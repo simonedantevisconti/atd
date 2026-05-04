@@ -1,7 +1,11 @@
-import React, { useEffect, useState } from "react";
-import volontariJson from "../data/volontari.json";
-
-const STORAGE_KEY = "atd_volontari";
+import React, { useEffect, useMemo, useState } from "react";
+import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
+import { db } from "../firebase/firebase";
+import {
+  addVolontario,
+  updateVolontario,
+  deleteVolontario,
+} from "../firebase/services";
 
 const emptyForm = {
   nome: "",
@@ -9,56 +13,137 @@ const emptyForm = {
   ruolo: "Autista",
 };
 
+const ConfirmDeleteModal = ({ open, contatto, onCancel, onConfirm }) => {
+  if (!open) return null;
+
+  const nomeCompleto = `${contatto?.nome || ""} ${
+    contatto?.cognome || ""
+  }`.trim();
+
+  return (
+    <>
+      <div
+        className="modal-backdrop fade show"
+        onClick={onCancel}
+        style={{ cursor: "pointer" }}
+      />
+
+      <div
+        className="modal fade show d-block"
+        role="dialog"
+        aria-modal="true"
+        tabIndex={-1}
+      >
+        <div
+          className="modal-dialog modal-dialog-centered"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="modal-content shadow-lg border-0">
+            <div className="modal-header bg-danger text-white">
+              <h5 className="modal-title">Conferma eliminazione</h5>
+              <button
+                type="button"
+                className="btn-close btn-close-white"
+                aria-label="Chiudi"
+                onClick={onCancel}
+              />
+            </div>
+
+            <div className="modal-body">
+              <p className="mb-0">
+                Vuoi eliminare il contatto{" "}
+                <strong>"{nomeCompleto || "selezionato"}"</strong>?
+              </p>
+            </div>
+
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="btn btn-outline-secondary"
+                onClick={onCancel}
+              >
+                Annulla
+              </button>
+
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={onConfirm}
+              >
+                Elimina
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+};
+
 const Contatti = () => {
   const [volontari, setVolontari] = useState([]);
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
+    const q = query(collection(db, "volontari"), orderBy("cognome", "asc"));
 
-    if (saved) {
-      setVolontari(JSON.parse(saved));
-    } else {
-      const iniziali = volontariJson.map((v) => ({
-        ...v,
-        ruolo: v.ruolo || "Volontario",
-      }));
-      setVolontari(iniziali);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(iniziali));
-    }
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const dati = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        }));
+
+        setVolontari(dati);
+        setLoading(false);
+      },
+      (error) => {
+        console.error(error);
+        setLoading(false);
+        alert("Errore nel caricamento dei volontari");
+      },
+    );
+
+    return () => unsubscribe();
   }, []);
 
-  const salvaStorage = (next) => {
-    setVolontari(next);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  };
+  const volontariOrdinati = useMemo(() => {
+    return [...volontari].sort((a, b) => {
+      const aText = `${a.cognome || ""} ${a.nome || ""}`.toLowerCase();
+      const bText = `${b.cognome || ""} ${b.nome || ""}`.toLowerCase();
+      return aText.localeCompare(bText);
+    });
+  }, [volontari]);
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
 
     if (!form.nome.trim() && !form.cognome.trim()) return;
 
-    if (editingId) {
-      const updated = volontari.map((v) =>
-        v.id === editingId ? { ...v, ...form } : v,
-      );
-
-      salvaStorage(updated);
-      setEditingId(null);
-      setForm(emptyForm);
-      return;
-    }
-
-    const nuovo = {
-      id: Date.now(),
+    const payload = {
       nome: form.nome.trim(),
       cognome: form.cognome.trim(),
       ruolo: form.ruolo,
     };
 
-    salvaStorage([...volontari, nuovo]);
-    setForm(emptyForm);
+    try {
+      if (editingId) {
+        await updateVolontario(editingId, payload);
+        setEditingId(null);
+        setForm(emptyForm);
+        return;
+      }
+
+      await addVolontario(payload);
+      setForm(emptyForm);
+    } catch (error) {
+      console.error(error);
+      alert("Errore nel salvataggio del contatto");
+    }
   };
 
   const modifica = (volontario) => {
@@ -72,12 +157,16 @@ const Contatti = () => {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const elimina = (id) => {
-    const conferma = window.confirm("Vuoi eliminare questo contatto?");
-    if (!conferma) return;
+  const elimina = async () => {
+    if (!deleteTarget?.id) return;
 
-    const filtered = volontari.filter((v) => v.id !== id);
-    salvaStorage(filtered);
+    try {
+      await deleteVolontario(deleteTarget.id);
+      setDeleteTarget(null);
+    } catch (error) {
+      console.error(error);
+      alert("Errore durante l'eliminazione del contatto");
+    }
   };
 
   const annullaModifica = () => {
@@ -170,32 +259,43 @@ const Contatti = () => {
           </thead>
 
           <tbody>
-            {volontari.map((v) => (
-              <tr key={v.id}>
-                <td>{v.nome || "—"}</td>
-                <td>{v.cognome || "—"}</td>
-                <td>{v.ruolo || "Volontario"}</td>
-                <td className="text-center">
-                  <div className="d-flex justify-content-center gap-2">
-                    <button
-                      className="btn btn-sm btn-outline-primary"
-                      onClick={() => modifica(v)}
-                    >
-                      Modifica
-                    </button>
-
-                    <button
-                      className="btn btn-sm btn-outline-danger"
-                      onClick={() => elimina(v.id)}
-                    >
-                      Elimina
-                    </button>
-                  </div>
+            {loading && (
+              <tr>
+                <td colSpan="4" className="text-center text-muted">
+                  Caricamento contatti...
                 </td>
               </tr>
-            ))}
+            )}
 
-            {volontari.length === 0 && (
+            {!loading &&
+              volontariOrdinati.map((v) => (
+                <tr key={v.id}>
+                  <td>{v.nome || "—"}</td>
+                  <td>{v.cognome || "—"}</td>
+                  <td>{v.ruolo || "Volontario"}</td>
+                  <td className="text-center">
+                    <div className="d-flex justify-content-center gap-2">
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-outline-primary"
+                        onClick={() => modifica(v)}
+                      >
+                        Modifica
+                      </button>
+
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-outline-danger"
+                        onClick={() => setDeleteTarget(v)}
+                      >
+                        Elimina
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+
+            {!loading && volontariOrdinati.length === 0 && (
               <tr>
                 <td colSpan="4" className="text-center text-muted">
                   Nessun contatto presente.
@@ -205,6 +305,13 @@ const Contatti = () => {
           </tbody>
         </table>
       </div>
+
+      <ConfirmDeleteModal
+        open={!!deleteTarget}
+        contatto={deleteTarget}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={elimina}
+      />
     </main>
   );
 };
